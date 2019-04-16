@@ -1,0 +1,132 @@
+' Programmet är skapat i kandidatarbetet Steering and Motorcontrol II - 2017/2018. 
+' Programmet syftar till att styra EPS-systemet i den autonoma Renault Twizyn. 
+' Detta program tar in både den verkliga vinkeln och referensvinkeln via 
+' CAN-bussen. En enkel P-regulator har implementerats, med ett toleransområde
+' på 6.3 grader på styrkolonnen (0.5 grader på hjulen). Vid vidare frågor
+' kontakta willju@student.chalmers.se eller carllinds@student.chalmers.se
+
+
+' Senast uppdaterat 4/5 - 18
+' 
+' Edo Campara, Filip Franson, Johan Karlsson 
+' Carl Lindström, William Ljungberg och Lars-Olof Tureson
+' 
+' 
+
+
+
+
+'----------- Initiering av variabler -----------------
+initialAngle = -1847						' Kalibrering av nolläge
+Kp = 3									' Regulatorparameter
+limPlus = 280								' Minsta gräns för aktuering åt höger
+limMinus = -280								' Minsta gräns för aktuering åt vänster
+canCounter = 0								' Säkerhetsvariabel
+
+' -------------- Void Loop start --------------------
+top:
+' ------------- Säkerhetsfunktion -------------------
+nocf = getvalue(_CF, 1)						' Kontroller ifall det finns CAN-meddelanden att läsa
+if nocf = 0 								' Finns det inget meddelandet att läsa addera 1 till
+	canCounter = canCounter + 1	
+		if canCounter > 1000 						' Om inga CAN-meddelanden lästs inom en viss tid 
+		SetCommand(_G,1,0)						' sätts motorernas output till 0.
+		print("\n !!!!!!!!!!!!CANVARNING!!!!!!!!! \n")
+		goto top					'
+	end if	
+	goto top											' säkerhetsvariabeln. Ifall det finns CAN-meddelanden
+else										' att läsa återställs säkerhetsvariabeln.
+	canCounter = 0					'
+end if 
+							'	
+						'
+' ------------- Slut säkerhetsfunktion ---------------
+
+id = getvalue(_CAN,1)							' Tar ut identifier bit ur CAN-meddelandet
+
+' ----------- Bestämning av verklig vinkel -----------
+if id = 192 then							' Om ID motsvarar vinkelgivarens ansätts
+	msb = getvalue(_CAN, 4)					' den verkliga vinkeln till den som de
+	lsb = getvalue(_CAN, 3)					' olika bitarna tillsammans motsvarar.
+		if msb > 200 then					' För att vidare se hur vinklarna 
+			msb = msb - 255					' representeras av bitarna se avsnittet
+			lsb = lsb - 255					' om reglering i rapport. Notera att 
+		end if								' vinkeln representeras med en faktor 10.
+							'
+actAngle = msb*256 + lsb				' 
+											' Ställ in så att vinkeln är noll då hjulen  
+actAngle = actAngle - initialAngle			' står rakt fram. 
+end if							'
+
+' ------- Slut Bestämning av verklig vinkel -----------
+' ----------- Bestämning av referens vinkel -----------
+if id = 150 then					'	
+	refAngleValue = getvalue(_CAN, 3)		' Om ID motsvarar den skickade referensvinkeln 
+	refAngleDir = getvalue(_CAN,4)			' så tas värdena ut och sätt till att 
+	refAngle = refAngleValue*5040			' motsvara just referensvinkeln. 
+											' Första biten antar värdet 0 - 255 och 
+											' motsvarat centralt till fullt rattutslag.
+		 					' 
+		if refAngleDir = 0 then				' Den andra biten antar värdet 0 eller 255
+		refAngle = -refAngle				' om biten är 0 så motsvarar detta vänster-
+		elseif refAngleDir = 255 then		' sväng. Om biten är 255 så motsvarar 
+		refAngle = refAngle					' detta högersväng
+		end if					' 
+		refAngle = refAngle/255				' Om det lästa CAN-meddelandet inte har något
+	 									' av dessa ID så går programmet tillbaks 										' och startar om Void Loop
+end if	
+
+if id <> 192 And id <> 150 then
+	canCounter = canCounter + 1
+	goto top
+	
+else 
+	canCounter = 0
+end if
+' ------- Slut Bestämning av referens vinkel -----------
+print("\n CANCOUNTER: \n")
+print(canCounter)
+print("\n ActAngle: \n")
+print(actAngle)
+print("\n RefAngle: \n")
+print(refAngle)
+print("\n ID: \n")
+print(id)
+print("\n Output: \n")
+print(output)
+
+' --- Bestämning av felet och jämförelse mot tolerans --			
+e = refAngle - actAngle	
+' Testa o öka detta		' 
+if e < 63 And e > -63 then					' Bestäm reglerfelet. Om felet ligger inom
+		'if e > 0 then						' toleransen sätts outputen till ett lågt
+		'SetCommand(_G,1,0)					' värde. Beroende på vilket håll hjulen står 
+		'elseif e < 0 then					' åt, läggs en liten spänning på för att
+		'SetCommand(_G,1,0)				' motverka de krafter som vill ställa 
+		'end if		
+									' tillbaks hjulen i centralt läge.
+			output = actAngle/25
+			' testa o sätta -output
+			SetCommand(_G,1,output)	
+									' Gå sedan tillbaks till början av Void Loop			
+	goto top					' 	
+end if							' 
+' --------- Slut Bestämning av felet -------------------
+' ------------ Aktuering av motorer --------------------
+output = Kp*e 					' Sätt outputen i EPS-motorn till värdet som 
+output = output/10
+if output > 1000 then						' motsvaras av regulatorn. 
+	output = 1000							' Funktionen tar ett värde mellan -1000 och	
+elseif output < -1000 then					' 1000, så alla värden över/under detta sätts  
+	output = -1000							' till de respektive värdet.
+elseif output < 0 then						' Sätter rätt output beroende på
+	output = output + limMinus				' vilket håll svängningen ska utföras.
+elseif output > 0 then					' 
+	output = output + limPlus			' 
+end if							' 
+						
+SetCommand(_G,1,output)	
+			'
+' ------------ Slut Aktuering av motorer ---------------
+goto top						' Gå tillbaks till början av Void Loop
+' ------------ Slut Void Loop ---------------------
